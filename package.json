@@ -1,7 +1,7 @@
 {
   "name": "streaming-gltf",
-  "version": "1.0.18",
-  "description": "Streaming progressive glTF LOD renderer (BatchedMesh/InstancedMesh tiers, network-lazy GPU-eager LOD streaming, on-GPU position lerping) plus the local bake/convert + streaming-download pipeline (tools/bake-*.mjs).",
+  "version": "2.0.0",
+  "description": "Cluster-LOD glTF renderer: UV-aware spatial meshlet clusters with per-cluster hierarchical LODs in one EXT_meshopt_compression GLB (EP_cluster_lod extras), drawn per-cluster via WEBGL_multi_draw. Bake with tools/bake-cluster.mjs.",
   "license": "MIT",
   "type": "module",
   "main": "./index.js",
@@ -9,8 +9,9 @@
   "exports": {
     ".": "./index.js",
     "./model-pool": "./examples/local-progressive/model-pool.js",
-    "./batched-far-tier": "./examples/local-progressive/batched-far-tier.js",
-    "./bake": "./tools/bake-progressive.mjs"
+    "./cluster-lod-mesh": "./examples/local-progressive/cluster-lod-mesh.js",
+    "./meshlet-codec": "./examples/local-progressive/meshlet-codec.js",
+    "./bake": "./tools/bake-cluster.mjs"
   },
   "files": [
     "index.js",
@@ -26,9 +27,9 @@
   },
   "homepage": "https://anentrypoint.github.io/streaming-gltf/",
   "scripts": {
-    "bake:local": "node tools/bake-progressive.mjs",
-    "bake:all": "node tools/bake-all.mjs",
-    "bake:stream": "node tools/bake-streaming.mjs",
+    "test": "node test.js",
+    "bake": "node tools/bake-cluster.mjs",
+    "bake:corpus": "node tools/bake-cluster-corpus.mjs",
     "demo:local": "node examples/local-progressive/serve.mjs",
     "measure": "node examples/local-progressive/measure-fps.mjs"
   },

@@ -29,6 +29,13 @@ import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { GlobalMaterialPool } from './material-pool.js';
+// Cluster-LOD (EP_cluster_lod): UV-aware spatial meshlet clusters with per-cluster
+// hierarchical LODs packed into one unified buffer, drawn per-cluster via
+// WEBGL_multi_draw. When an asset carries the extra this is THE LOD mechanism for
+// it (supersedes the discrete _pickMeshLod sibling-LOD ladder); legacy assets
+// without it keep the discrete path.
+import { ClusterLodMesh, attachClusterLod } from './cluster-lod-mesh.js';
+import { CLUSTER_LOD_EXTRA_KEY } from './meshlet-codec.js';
 import { DeferredLoadQueue } from './deferred-load-queue.js';
 import { LodUnloadManager } from './lod-unload-manager.js';
 import { CachedFrustumPlanes } from './frustum-cache.js';
@@ -521,6 +528,48 @@ class Asset {
           this.texLodDescs.push({ textureIndex: t.textureIndex, name: t.name, lods: sortedT });
         }
       }
+
+      // Cluster-LOD detection: scan the glTF json for primitives carrying
+      // extras.EP_cluster_lod, indexed by mesh-traversal order so Entity._bootstrap
+      // can match the cloned scene's meshes. When ANY prim has it the asset is in
+      // cluster mode and bypasses the discrete-LOD machinery for those meshes.
+      this.clusterLod = null; // meshTraversalIdx -> { extras, coarseAccessorIndex }
+      try {
+        let any = false;
+        const map = new Map();
+        let order = 0;
+        for (const m of json.meshes || []) {
+          for (const prim of m.primitives || []) {
+            const ex = prim.extras && prim.extras[CLUSTER_LOD_EXTRA_KEY];
+            if (ex) { map.set(order, { extras: prim.extras, coarseAccessorIndex: ex.coarseIndexAccessor }); any = true; }
+            order++;
+          }
+        }
+        if (any) this.clusterLod = map;
+      } catch (_) { this.clusterLod = null; }
+
+      // Cluster mode: prepare each clustered mesh's geometry ONCE on the asset
+      // (attach the combined [LOD0|coarse] index + parse the ClusterSet). Entities
+      // share this geometry; each spawns its own ClusterLodMesh (the per-cluster
+      // cull/LOD/multi-draw self-drives off camera in onBeforeRender). This is THE
+      // LOD path — the discrete meshLodDescs ladder is not built in cluster mode.
+      this.clusterMeshes = null; // [{ geometry, material, clusterSet, lod0Count }]
+      if (this.clusterLod) {
+        this.clusterMeshes = [];
+        const meshes = [];
+        gltf.scene.traverse((c) => { if (c.isMesh) meshes.push(c); });
+        let ord = 0;
+        for (const m of meshes) {
+          const info = this.clusterLod.get(ord++);
+          if (!info) continue;
+          let coarse = null;
+          if (info.coarseAccessorIndex >= 0) {
+            try { coarse = (await gltf.parser.getDependency('accessor', info.coarseAccessorIndex)).array; } catch (_) {}
+          }
+          const attached = attachClusterLod(m.geometry, info.extras, coarse);
+          if (attached) this.clusterMeshes.push({ geometry: m.geometry, material: m.material, clusterSet: attached.clusterSet, lod0Count: attached.lod0Count });
+        }
+      }
       // Pre-cache the inline (lowest-textured) geometry per primitive AND the
       // smallest textures from the root — they're already in the parsed
       // gltf scene; no second fetch needed.
@@ -966,6 +1015,34 @@ class Entity extends Emitter {
       // node hierarchy is static per entity.
       this.root.updateMatrixWorld(true);
       const _rootInv = new THREE.Matrix4().copy(this.root.matrixWorld).invert();
+      // Cluster mode: replace each cloned mesh with a ClusterLodMesh sharing the
+      // asset's prepared geometry. The per-cluster frustum-cull + LOD-select +
+      // single multi-draw runs in ClusterLodMesh.onBeforeRender off the live
+      // camera, so the entity needs NO per-frame LOD work (trackedMeshes stays
+      // empty and _update's discrete-LOD pass is a no-op for this entity).
+      if (this.asset.clusterMeshes && this.asset.clusterMeshes.length) {
+        const meshOrderC = [];
+        cloned.traverse((c) => { if (c.isMesh) meshOrderC.push(c); });
+        this.clusterMeshes = [];
+        for (let i = 0; i < this.asset.clusterMeshes.length; i++) {
+          const cm = this.asset.clusterMeshes[i];
+          const src = meshOrderC[i] || meshOrderC[0];
+          if (!src) continue;
+          const clm = new ClusterLodMesh(cm.geometry, cm.material, cm.clusterSet, {
+            lod0Count: cm.lod0Count, // live viewport height read from renderer per frame
+          });
+          clm.applyMatrix4(src.matrixWorld); // keep the source node's placement
+          src.parent.add(clm);
+          src.removeFromParent();
+          // three skips onBeforeRender for empty draw ranges; keep a 3-index
+          // sentinel so the hook fires and issues the real multi-draw.
+          cm.geometry.setDrawRange(0, 3);
+          this.clusterMeshes.push(clm);
+        }
+        this.emit('ready', this);
+        return;
+      }
+
       // Discover tracked meshes by descriptor.
       const meshOrder = [];
       cloned.traverse((c) => { if (c.isMesh) meshOrder.push(c); });
@@ -1297,6 +1374,13 @@ class Entity extends Emitter {
   // Used to track per-frame budget consumption across HERO/MID/FAR tiers.
   _update(camera, viewportHeight, dt, globalCeilingLod, frustum, animationThrottleDistance) {
     if (this._disposed) return { distance: Infinity, screenPx: 0, tier: 'far' };
+    // Cluster entities self-drive LOD in ClusterLodMesh.onBeforeRender; the entity
+    // does no per-frame LOD work. Keep matrices fresh and return a neutral result.
+    if (this.clusterMeshes && this.clusterMeshes.length) {
+      if (this.root.matrixAutoUpdate) this.root.updateMatrixWorld();
+      if (this.animationMixer) this.animationMixer.update(dt);
+      return { distance: 0, screenPx: 9999, tier: 'cluster' };
+    }
     let primaryMesh = this.trackedMeshes[0]?.mesh;
     if (!primaryMesh) return { distance: Infinity, screenPx: 0, tier: 'far' };
     // FAST SKIP (static + camera still + fully GPU-instanced): nothing this

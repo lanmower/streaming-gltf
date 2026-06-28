@@ -1,8 +1,15 @@
-# Progressive glTF LOD renderer
+# Cluster-LOD glTF renderer
 
 A self-contained three.js renderer for large scenes of distinct glTF/GLB models
-with progressive LOD streaming, plus the local pipeline that converts source
-models into the progressive format it consumes.
+using **UV-aware spatial meshlet clusters**: each model is baked into one valid
+GLB of spatially coherent clusters, each carrying a hierarchy of UV-aware
+simplified LODs, packed into a single unified buffer. At runtime every visible
+cluster picks a LOD by projected screen size and the whole mesh draws in a single
+`WEBGL_multi_draw` call. Textures never tear (UV-aware simplification), and stock
+glTF viewers ignore the cluster metadata and render the full-resolution mesh.
+
+See [AGENTS.md](AGENTS.md) for the format (`EP_cluster_lod` extras +
+`EXT_meshopt_compression`) and runtime details.
 
 ## Live demo
 
@@ -22,17 +29,24 @@ a CDN build, or your bundler); they are not bundled.
 
 ```js
 import { ModelPool } from 'streaming-gltf';
-// or: import { BatchedFarTier } from 'streaming-gltf/batched-far-tier';
+// also exported: ClusterLodMesh, attachClusterLod (runtime),
+// buildClusterLod, parseClusterLod, CLUSTER_LOD_EXTRA_KEY (codec).
 
 const pool = new ModelPool({ scene, renderer, camera });
-const entity = pool.spawn(url, { position: [x, 0, z] });
+const entity = pool.spawn(url, { position: [x, 0, z] }); // url -> a cluster GLB
 
-// per frame, after advancing the camera:
+// per frame, after advancing the camera (per-cluster LOD + multi-draw self-drive):
 pool.update();
 
-// sparse position targets — the GPU interpolates each frame (far tier),
-// so moving entities cost ~no per-frame CPU matrix writes:
+// sparse position targets — the GPU interpolates each frame:
 pool.setTarget(entity, x, y, z, durationMs);
+```
+
+Bake a source GLB to the cluster-LOD format:
+
+```sh
+npm run bake -- path/to/source.glb path/to/out.cluster.glb
+npm run bake:corpus            # whole ../assets corpus -> manifest.cluster.json
 ```
 
 ## VRM support
