@@ -93,3 +93,4 @@ examples/local-progressive/impostor-*smoke.json
 # Harness session dir + transient install lockfile (deps tracked via package.json)
 .claude/
 package-lock.json
+config.bat
